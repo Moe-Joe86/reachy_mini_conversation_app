@@ -24,7 +24,10 @@ Safety
 """
 
 from __future__ import annotations
+import os
+import json
 import time
+import socket
 import logging
 import threading
 from queue import Empty, Queue
@@ -46,6 +49,13 @@ logger = logging.getLogger(__name__)
 
 # Configuration constants
 CONTROL_LOOP_FREQUENCY_HZ = 60.0  # Hz - Target frequency for the movement control loop
+
+
+def _momo_koerper_ziel() -> Tuple[str, int] | None:
+    """MoMo, AENDERUNGEN Nr. 1: Adresse des Compositors aus MOMO_KOERPER_ADRESSE (host:port), sonst None."""
+    host, _, port = os.environ.get("MOMO_KOERPER_ADRESSE", "").rpartition(":")
+    return (host, int(port)) if host and port.isdigit() else None
+
 
 # Type definitions
 FullBodyPose = Tuple[NDArray[np.float32], Tuple[float, float], float]  # (head_pose_4x4, antennas, body_yaw)
@@ -226,6 +236,10 @@ class MovementManager:
         self._last_set_target_err = 0.0
         self._set_target_err_interval = 1.0  # seconds between error logs
         self._set_target_err_suppressed = 0
+        # MoMo, AENDERUNGEN Nr. 1: mit Adresse geht die Pose an den Compositor statt an set_target.
+        self._koerper_ziel = _momo_koerper_ziel()
+        self._koerper = socket.socket(socket.AF_INET, socket.SOCK_DGRAM) if self._koerper_ziel else None
+        self._rohantennen: Tuple[float, float] = (0.0, 0.0)
 
         # Cross-thread signalling
         self._command_queue: "Queue[Tuple[str, Any]]" = Queue()
@@ -552,7 +566,10 @@ class MovementManager:
     ) -> None:
         """Send the pose to the robot with throttled error logging."""
         try:
-            self.current_robot.set_target(head=head, antennas=antennas, body_yaw=body_yaw)
+            if self._koerper is not None:
+                self._sende_an_koerper(head, antennas, body_yaw)
+            else:
+                self.current_robot.set_target(head=head, antennas=antennas, body_yaw=body_yaw)
         except Exception as e:
             now = self._now()
             if now - self._last_set_target_err >= self._set_target_err_interval:
@@ -567,6 +584,21 @@ class MovementManager:
         else:
             with self._status_lock:
                 self._last_commanded_pose = clone_full_body_pose((head, antennas, body_yaw))
+
+    def _sende_an_koerper(self, head: NDArray[np.float32], antennas: Tuple[float, float], body_yaw: float) -> None:
+        """MoMo, AENDERUNGEN Nr. 1: je Takt ein UDP-Paket mit Pose, Rohantennen, Art der Bewegung und „hört zu“."""
+        move = self.state.current_move
+        nachricht = {
+            "kopf": np.asarray(head, dtype=float).tolist(),
+            "antennen": [float(antennas[0]), float(antennas[1])],
+            "rohantennen": [float(self._rohantennen[0]), float(self._rohantennen[1])],
+            "koerper": float(body_yaw),
+            "art": type(move).__name__ if move is not None else "",
+            "hoert_zu": self._is_listening,
+        }
+        if self._koerper is None or self._koerper_ziel is None:
+            return
+        self._koerper.sendto(json.dumps(nachricht).encode("utf-8"), self._koerper_ziel)
 
     def _update_frequency_stats(
         self,
@@ -744,6 +776,7 @@ class MovementManager:
 
             # 3) Build the primary full-body pose for this tick
             head, antennas, body_yaw = self._get_primary_pose(loop_start)
+            self._rohantennen = antennas  # MoMo, AENDERUNGEN Nr. 1: vor dem Einfrieren beim Zuhören
 
             # 4) Apply listening antenna freeze or blend-back
             antennas_cmd = self._calculate_blended_antennas(antennas)
