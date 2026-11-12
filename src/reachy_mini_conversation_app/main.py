@@ -1,6 +1,7 @@
 """Entrypoint for the Reachy Mini conversation app."""
 
 from __future__ import annotations
+import os  # MoMo, AENDERUNGEN Nr. 2
 import sys
 import time
 import asyncio
@@ -331,7 +332,13 @@ def run(
     # Audio-reactive head motion is driven by the daemon's wobbler, which
     # taps the media pipeline at push_audio_sample. The console stream pushes
     # assistant audio through that pipeline directly.
-    robot.enable_wobbling()
+    # MoMo, AENDERUNGEN Nr. 2: mit MOMO_KOPFWACKELN=aus bleibt der Kopf beim Sprechen ruhig; ohne Variable wie Pollen.
+    if os.environ.get("MOMO_KOPFWACKELN") == "aus":
+        robot.disable_wobbling()
+        logger.info("Kopfwackeln aus (MoMo, AENDERUNGEN Nr. 2)")
+    else:
+        robot.enable_wobbling()
+        logger.info("Kopfwackeln an (MoMo, AENDERUNGEN Nr. 2)")
 
     timeout_minutes = resolve_app_timeout_minutes()
     if timeout_minutes is not None:
